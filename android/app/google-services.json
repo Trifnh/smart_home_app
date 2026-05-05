@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "818523681726",
+    "firebase_url": "https://pbl6-e6ea4-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "pbl6-e6ea4",
+    "storage_bucket": "pbl6-e6ea4.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:818523681726:android:940d6c31f0de7d5e21bfef",
+        "android_client_info": {
+          "package_name": "com.example.smart_home_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC4h5tdUJF40iKVvUCfjPu70smMcczWbXA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
