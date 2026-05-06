@@ -36,8 +36,13 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
     (key: 'gas', label: 'Gas', unit: ''),
     (key: 'smoke', label: 'Khói', unit: ''),
   ];
+  Map<String, AutomationRule> _rulesCache = const {};
+  Map<String, dynamic>? _automationCfgDraft;
 
-  Future<void> _openEditor([AutomationRule? existing]) async {
+  Future<void> _openEditor([
+    AutomationRule? existing,
+    Map<String, dynamic>? sensorCfg,
+  ]) async {
     final svc = ref.read(firebaseServiceProvider);
     final nameCtrl = TextEditingController(text: existing?.name ?? '');
     final thCtrl = TextEditingController(
@@ -49,7 +54,7 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
     var targetOn = existing?.targetOn ?? true;
     var enabled = existing?.enabled ?? true;
     final sensorChoices = _automationSensorChoices(
-      ref.read(automationSensorConfigProvider).asData?.value,
+      sensorCfg ?? ref.read(automationSensorConfigProvider).asData?.value,
       ref.read(sensorsMapProvider).asData?.value,
     );
     if (sensorChoices.isNotEmpty && !sensorChoices.contains(sensor)) {
@@ -68,6 +73,9 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      isDismissible: true,
+      enableDrag: true,
+      showDragHandle: true,
       backgroundColor:
           Theme.of(context).cardTheme.color ?? Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(
@@ -143,7 +151,7 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
                             value: k,
                             label: _sensorLabelFromConfigOrPreset(
                               k,
-                              ref.read(automationSensorConfigProvider).asData?.value,
+                              sensorCfg ?? ref.read(automationSensorConfigProvider).asData?.value,
                             ),
                           ),
                       ],
@@ -296,24 +304,42 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
       },
     );
 
-    nameCtrl.dispose();
-    thCtrl.dispose();
+    // Do not dispose immediately here; async callbacks in the sheet can still
+    // touch the controllers if user closes while an await is in-flight.
   }
 
   @override
   Widget build(BuildContext context) {
     final svc = ref.watch(firebaseServiceProvider);
-    final autoCfg =
+    final remoteAutoCfg =
         ref.watch(automationSensorConfigProvider).asData?.value ?? const <String, dynamic>{};
+    if (_automationCfgDraft != null &&
+        _configEquivalent(_automationCfgDraft!, remoteAutoCfg)) {
+      _automationCfgDraft = null;
+    }
+    final autoCfg = _automationCfgDraft ?? remoteAutoCfg;
     final enabledSensors = _automationEnabledSensors(autoCfg);
+    final rulesAsync = ref.watch(automationsProvider);
+    final liveRules = rulesAsync.asData?.value;
+    if (liveRules != null) _rulesCache = liveRules;
 
     return Stack(
       children: [
-        StreamBuilder<Map<String, AutomationRule>>(
-          stream: svc.listenAutomations(),
-          builder: (context, snap) {
-            final rules = snap.data?.entries.toList() ?? [];
-            rules.sort((a, b) => a.key.compareTo(b.key));
+        Builder(
+          builder: (context) {
+            if (rulesAsync.hasError) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Text(
+                    'Auto load failed: ${rulesAsync.error}',
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              );
+            }
+            final rules = _rulesCache.entries.toList()
+              ..sort((a, b) => a.key.compareTo(b.key));
 
             if (rules.isEmpty) {
               return ListView(
@@ -384,7 +410,7 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
                     )
                     .$2;
                 return Dismissible(
-                  key: Key(r.id),
+                  key: ValueKey(r.id),
                   direction: DismissDirection.endToStart,
                   background: Container(
                     alignment: Alignment.centerRight,
@@ -424,7 +450,7 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
                     ),
                     child: InkWell(
                       borderRadius: BorderRadius.circular(18),
-                      onTap: () async => _openEditor(r),
+                      onTap: () async => _openEditor(r, autoCfg),
                       child: Padding(
                         padding: const EdgeInsets.all(16),
                         child: Column(
@@ -486,7 +512,7 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
           bottom: 88,
           right: 20,
           child: FloatingActionButton.extended(
-            onPressed: () => _openEditor(),
+            onPressed: () => _openEditor(null, autoCfg),
             icon: const Icon(Icons.auto_awesome_rounded),
             label: const Text('+ Rule'),
             backgroundColor: Theme.of(context).colorScheme.primary,
@@ -497,7 +523,7 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
   }
 
   List<String> _automationEnabledSensors(Map<String, dynamic> cfg) {
-    if (cfg.isEmpty) return const ['temperature', 'humidity'];
+    if (cfg.isEmpty) return const [];
     final out = <String>[];
     for (final e in cfg.entries) {
       final k = e.key.toString().toLowerCase();
@@ -514,7 +540,16 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
     final c = cfg ?? const <String, dynamic>{};
     if (c.isNotEmpty) {
       final enabled = _automationEnabledSensors(c);
-      return enabled;
+      if (enabled.isNotEmpty) return enabled;
+      // Safety fallback: if config exists but all keys are OFF,
+      // still provide choices to avoid empty Dropdown runtime issues.
+      final fallback = <String>{
+        ...c.keys.map((k) => k.toString().toLowerCase()),
+        'temperature',
+        'humidity',
+      }.toList()
+        ..sort();
+      return fallback;
     }
     final s = <String>{
       for (final p in _sensorPresets) p.key.toLowerCase(),
@@ -535,6 +570,23 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
           (e is String && (e.toLowerCase() == 'true' || e == '1'));
     }
     return false;
+  }
+
+  bool _configEquivalent(Map<String, dynamic> a, Map<String, dynamic> b) {
+    if (a.length != b.length) return false;
+    for (final e in a.entries) {
+      final key = e.key.toLowerCase();
+      if (!b.containsKey(key)) return false;
+      final av = e.value;
+      final bv = b[key];
+      if (_configEntryEnabled(av) != _configEntryEnabled(bv)) return false;
+      final al = av is Map ? (av['label']?.toString() ?? '').trim() : '';
+      final bl = bv is Map ? (bv['label']?.toString() ?? '').trim() : '';
+      final au = av is Map ? (av['unit']?.toString() ?? '').trim() : '';
+      final bu = bv is Map ? (bv['unit']?.toString() ?? '').trim() : '';
+      if (al != bl || au != bu) return false;
+    }
+    return true;
   }
 
   String _sensorLabelFromConfigOrPreset(String key, Map<String, dynamic>? cfg) {
@@ -567,19 +619,15 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
 
   Future<void> _openAutomationSensorManager(Map<String, dynamic> cfg) async {
     final svc = ref.read(firebaseServiceProvider);
+    final messenger = ScaffoldMessenger.of(context);
     final keyCtrl = TextEditingController();
     final labelCtrl = TextEditingController();
     final unitCtrl = TextEditingController();
 
     final globalSensors = ref.read(sensorsMapProvider).asData?.value ?? const <String, dynamic>{};
-    final known = <String>{
-      ...cfg.keys.map((k) => k.toString().toLowerCase()),
-      ...globalSensors.keys.map((k) => k.toString().toLowerCase()),
-      for (final p in _sensorPresets) p.key.toLowerCase(),
-    }.toList()
-      ..sort();
+    final localCfg = Map<String, dynamic>.from(cfg);
 
-    await showModalBottomSheet<void>(
+    final updatedCfg = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
       isScrollControlled: true,
       backgroundColor:
@@ -592,16 +640,25 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
           padding: EdgeInsets.only(
             left: 22,
             right: 22,
-            top: 18,
-            bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
+            top: 10,
+            bottom: MediaQuery.of(ctx).viewInsets.bottom + 18,
           ),
           child: StatefulBuilder(
             builder: (context, setSheet) {
-              final liveCfg = ref.read(automationSensorConfigProvider).asData?.value ??
-                  Map<String, dynamic>.from(cfg);
+              final liveCfg = Map<String, dynamic>.from(localCfg);
+              final known = <String>{
+                ...liveCfg.keys.map((k) => k.toString().toLowerCase()),
+                ...globalSensors.keys.map((k) => k.toString().toLowerCase()),
+                for (final p in _sensorPresets) p.key.toLowerCase(),
+              }.toList()
+                ..sort();
               final enabled = _automationEnabledSensors(liveCfg);
-              return SingleChildScrollView(
-                child: Column(
+              return ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(ctx).size.height * 0.84,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
@@ -625,7 +682,7 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      'Bật/tắt key sensor để dropdown “Sensor” trong rule chỉ hiện key được bật.',
+                      'Bật/tắt key sensor để dropdown “Sensor” trong + Rule chỉ hiện key đang bật.',
                       style: TextStyle(
                         fontSize: 12,
                         height: 1.35,
@@ -642,16 +699,57 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
                         label: _sensorLabelFromConfigOrPreset(k, liveCfg),
                         enabled: enabled.contains(k),
                         onToggle: (v) async {
-                          await svc.upsertAutomationSensorConfig(
-                            sensorKey: k,
-                            enabled: v,
-                          );
+                          final old = liveCfg[k];
+                          localCfg[k] = {
+                            ...(liveCfg[k] is Map
+                                ? Map<String, dynamic>.from(liveCfg[k] as Map)
+                                : <String, dynamic>{}),
+                            'enabled': v,
+                          };
+                          if (mounted) {
+                            setState(() => _automationCfgDraft = Map<String, dynamic>.from(localCfg));
+                          }
                           setSheet(() {});
+                          try {
+                            await svc.upsertAutomationSensorConfig(
+                              sensorKey: k,
+                              enabled: v,
+                            );
+                          } catch (e) {
+                            if (old == null) {
+                              localCfg.remove(k);
+                            } else {
+                              localCfg[k] = old;
+                            }
+                            if (mounted) {
+                              setState(() => _automationCfgDraft = Map<String, dynamic>.from(localCfg));
+                            }
+                            setSheet(() {});
+                            messenger.showSnackBar(
+                              SnackBar(content: Text('Không cập nhật được $k: $e')),
+                            );
+                          }
                         },
                         onRemove: liveCfg.containsKey(k)
                             ? () async {
-                                await svc.removeAutomationSensorConfig(sensorKey: k);
+                                final old = liveCfg[k];
+                                localCfg.remove(k);
+                                if (mounted) {
+                                  setState(() => _automationCfgDraft = Map<String, dynamic>.from(localCfg));
+                                }
                                 setSheet(() {});
+                                try {
+                                  await svc.removeAutomationSensorConfig(sensorKey: k);
+                                } catch (e) {
+                                  if (old != null) localCfg[k] = old;
+                                  if (mounted) {
+                                    setState(() => _automationCfgDraft = Map<String, dynamic>.from(localCfg));
+                                  }
+                                  setSheet(() {});
+                                  messenger.showSnackBar(
+                                    SnackBar(content: Text('Không xoá được $k: $e')),
+                                  );
+                                }
                               }
                             : null,
                       ),
@@ -693,22 +791,62 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
                       onPressed: () async {
                         final key = keyCtrl.text.trim().toLowerCase();
                         if (key.isEmpty) return;
-                        await svc.upsertAutomationSensorConfig(
-                          sensorKey: key,
-                          enabled: true,
-                          label: labelCtrl.text,
-                          unit: unitCtrl.text,
-                        );
-                        keyCtrl.clear();
-                        labelCtrl.clear();
-                        unitCtrl.clear();
+                        final old = liveCfg[key];
+                        localCfg[key] = {
+                          'enabled': true,
+                          if (labelCtrl.text.trim().isNotEmpty)
+                            'label': labelCtrl.text.trim(),
+                          if (unitCtrl.text.trim().isNotEmpty)
+                            'unit': unitCtrl.text.trim(),
+                        };
+                        if (mounted) {
+                          setState(() => _automationCfgDraft = Map<String, dynamic>.from(localCfg));
+                        }
                         setSheet(() {});
+                        try {
+                          await svc.upsertAutomationSensorConfig(
+                            sensorKey: key,
+                            enabled: true,
+                            label: labelCtrl.text,
+                            unit: unitCtrl.text,
+                          );
+                          keyCtrl.clear();
+                          labelCtrl.clear();
+                          unitCtrl.clear();
+                          messenger.showSnackBar(
+                            SnackBar(content: Text('Đã thêm sensor key: $key')),
+                          );
+                        } catch (e) {
+                          if (old == null) {
+                            localCfg.remove(key);
+                          } else {
+                            localCfg[key] = old;
+                          }
+                          if (mounted) {
+                            setState(() => _automationCfgDraft = Map<String, dynamic>.from(localCfg));
+                          }
+                          setSheet(() {});
+                          messenger.showSnackBar(
+                            SnackBar(content: Text('Không thêm được $key: $e')),
+                          );
+                        }
                       },
                       icon: const Icon(Icons.add_rounded),
                       label: const Text('Add sensor'),
                       style: FilledButton.styleFrom(backgroundColor: AppTheme.accentDim),
                     ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.of(context).pop(
+                          Map<String, dynamic>.from(localCfg),
+                        ),
+                        child: const Text('Done'),
+                      ),
+                    ),
                   ],
+                ),
                 ),
               );
             },
@@ -716,10 +854,12 @@ class _AutomationScreenState extends ConsumerState<AutomationScreen> {
         );
       },
     );
+    if (!mounted) return;
+    if (updatedCfg != null) {
+      setState(() => _automationCfgDraft = updatedCfg);
+    }
 
-    keyCtrl.dispose();
-    labelCtrl.dispose();
-    unitCtrl.dispose();
+    // Keep controllers alive for the full async lifecycle of the sheet action.
   }
 }
 

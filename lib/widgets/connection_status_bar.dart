@@ -18,6 +18,7 @@ class ConnectionStatusBar extends ConsumerStatefulWidget {
 
 class _ConnectionStatusBarState extends ConsumerState<ConnectionStatusBar> {
   late final StreamSubscription<List<ConnectivityResult>> _netSub;
+  Timer? _tick;
   List<ConnectivityResult> _connectivity = [ConnectivityResult.none];
 
   @override
@@ -29,10 +30,15 @@ class _ConnectionStatusBarState extends ConsumerState<ConnectionStatusBar> {
     _netSub = Connectivity().onConnectivityChanged.listen((r) {
       if (mounted) setState(() => _connectivity = r);
     });
+    // Keep hub "lastSeen" staleness fresh even when no new event arrives.
+    _tick = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
   void dispose() {
+    _tick?.cancel();
     _netSub.cancel();
     super.dispose();
   }
@@ -43,81 +49,69 @@ class _ConnectionStatusBarState extends ConsumerState<ConnectionStatusBar> {
 
   @override
   Widget build(BuildContext context) {
-    final service = ref.watch(firebaseServiceProvider);
     final mqtt = ref.watch(mqttEdgeServiceProvider);
+    final firebaseOn = ref.watch(firebaseConnectedProvider).asData?.value == true;
+    final hub = ref.watch(hubHealthProvider).asData?.value ?? const <String, dynamic>{};
+    final hubOnline = hub['online'];
+    bool hubAlive = hubOnline == true || hubOnline == 1 || hubOnline == 'true';
+    if (hub['lastSeen'] != null) {
+      final ls = hub['lastSeen'];
+      final ms = ls is num ? ls.toInt() : int.tryParse('$ls') ?? 0;
+      if (ms > 0) {
+        final fresh = DateTime.now().millisecondsSinceEpoch - ms < 90000;
+        hubAlive = hubAlive && fresh;
+      }
+    }
+    // If Pi never wrote `system/hub`, keep OFFLINE (do not infer from cloud state).
+    if (hubOnline == null && hub['lastSeen'] == null) hubAlive = false;
 
-    return StreamBuilder<bool>(
-      stream: service.listenFirebaseConnected(),
-      initialData: false,
-      builder: (context, fbSnap) {
-        final firebaseOn = fbSnap.data == true;
+    if (widget.compact) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _dot(_hasInternet, 'Mạng'),
+          const SizedBox(width: 8),
+          _dot(firebaseOn, 'Cloud'),
+          const SizedBox(width: 8),
+          _dot(hubAlive, 'Hub'),
+          const SizedBox(width: 8),
+          _dot(mqtt.isConnected, 'MQTT'),
+        ],
+      );
+    }
 
-        return StreamBuilder<Map<String, dynamic>>(
-          stream: service.listenHubHealth(),
-          builder: (context, hubSnap) {
-            final hub = hubSnap.data ?? {};
-            final hubOnline = hub['online'];
-            bool hubAlive =
-                hubOnline == true || hubOnline == 1 || hubOnline == 'true';
-            if (!hubAlive && hub['lastSeen'] != null) {
-              final ls = hub['lastSeen'];
-              final ms = ls is num ? ls.toInt() : int.tryParse('$ls') ?? 0;
-              if (ms > 0) {
-                hubAlive = DateTime.now().millisecondsSinceEpoch - ms < 90000;
-              }
-            }
-
-            if (widget.compact) {
-              return Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _dot(_hasInternet, 'Mạng'),
-                  const SizedBox(width: 8),
-                  _dot(firebaseOn, 'Cloud'),
-                  const SizedBox(width: 8),
-                  _dot(hubOnline != null ? hubAlive : firebaseOn, 'Hub'),
-                  const SizedBox(width: 8),
-                  _dot(mqtt.isConnected, 'MQTT'),
-                ],
-              );
-            }
-
-            return Wrap(
-              spacing: 10,
-              runSpacing: 8,
-              children: [
-                _chip(
-                  icon: Icons.wifi_rounded,
-                  label: _hasInternet ? 'Mạng' : 'Mạng offline',
-                  active: _hasInternet,
-                  sub: !_hasInternet ? 'Chế độ local/demo hạn chế' : null,
-                ),
-                _chip(
-                  icon: Icons.cloud_done_rounded,
-                  label: firebaseOn ? 'Firebase realtime' : 'Cloud ngắt',
-                  active: firebaseOn,
-                ),
-                _chip(
-                  icon: Icons.hub_rounded,
-                  label: hub['online'] != null
-                      ? (hubAlive ? 'Edge hub online' : 'Edge hub offline')
-                      : 'Hub (Pi) chưa gửi trạng thái',
-                  active: hub['online'] != null ? hubAlive : firebaseOn,
-                  sub: hub['online'] == null ? 'Cấu hình Pi ghi system/hub' : null,
-                ),
-                _chip(
-                  icon: Icons.cable_rounded,
-                  label: mqtt.enabled
-                      ? (mqtt.isConnected ? 'MQTT LAN' : 'MQTT chờ broker')
-                      : 'MQTT tắt',
-                  active: mqtt.isConnected,
-                  sub: mqtt.enabled ? '${mqtt.host}:${mqtt.port}' : 'Cài đặt → bật hybrid',
-                ),
-              ],
-            );
-          },
-        );
-      },
+    return Wrap(
+      spacing: 10,
+      runSpacing: 8,
+      children: [
+        _chip(
+          icon: Icons.wifi_rounded,
+          label: _hasInternet ? 'Mạng' : 'Mạng offline',
+          active: _hasInternet,
+          sub: !_hasInternet ? 'Chế độ local/demo hạn chế' : null,
+        ),
+        _chip(
+          icon: Icons.cloud_done_rounded,
+          label: firebaseOn ? 'Firebase realtime' : 'Cloud ngắt',
+          active: firebaseOn,
+        ),
+        _chip(
+          icon: Icons.hub_rounded,
+          label: hubAlive ? 'Edge hub online' : 'Edge hub offline',
+          active: hubAlive,
+          sub: hub['online'] == null && hub['lastSeen'] == null
+              ? 'Pi chưa gửi system/hub'
+              : null,
+        ),
+        _chip(
+          icon: Icons.cable_rounded,
+          label: mqtt.enabled
+              ? (mqtt.isConnected ? 'MQTT LAN' : 'MQTT chờ broker')
+              : 'MQTT tắt',
+          active: mqtt.isConnected,
+          sub: mqtt.enabled ? '${mqtt.host}:${mqtt.port}' : 'Cài đặt → bật hybrid',
+        ),
+      ],
     );
   }
 

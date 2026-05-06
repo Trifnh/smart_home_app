@@ -476,7 +476,7 @@ class _MiniHubCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final data = hub.asData?.value ?? const <String, dynamic>{};
     final onlineRaw = data['online'];
-    final online = onlineRaw == true ||
+    final declaredOnline = onlineRaw == true ||
         onlineRaw == 1 ||
         (onlineRaw is String &&
             (onlineRaw.toLowerCase() == 'true' || onlineRaw == '1'));
@@ -486,11 +486,13 @@ class _MiniHubCard extends StatelessWidget {
     if (lastSeen is int) last = DateTime.fromMillisecondsSinceEpoch(lastSeen);
     if (lastSeen is num) last = DateTime.fromMillisecondsSinceEpoch(lastSeen.toInt());
     final Duration? ago = last == null ? null : DateTime.now().difference(last);
+    final fresh = ago != null && ago.inSeconds < 90;
+    final online = declaredOnline && fresh;
     final lastText = ago == null
         ? 'Last updated: --'
         : (ago.inSeconds < 60
-            ? 'Last updated: ${ago.inSeconds}s ago'
-            : 'Last updated: ${ago.inMinutes}m ago');
+            ? 'Last updated: ${ago.inSeconds}s'
+            : 'Last updated: ${ago.inMinutes}m');
 
     final accent = online ? AppTheme.accent : AppTheme.danger;
     return _MiniStatCard(

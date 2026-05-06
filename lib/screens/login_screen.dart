@@ -101,17 +101,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           color: AppTheme.accent,
                         ),
                         const SizedBox(height: 14),
-                        const Text(
+                        Text(
                           'Smart AIoT Home',
                           style: TextStyle(
                             fontSize: 24,
+                            color: Colors.white.withValues(alpha: 0.55),
                             fontWeight: FontWeight.w800,
                             letterSpacing: -0.5,
                           ),
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'Control center ESP32 • Pi • Firebase',
+                          'Group 12 - FAST - Hải Trình - Đình Khánh',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             fontSize: 13,
